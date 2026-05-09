@@ -35,9 +35,38 @@ canvas  { display:block; width:100%; height:60px; }
 footer  { border-top:1px solid #bbb; padding-top:5px; display:flex; justify-content:space-between; font-size:9px; color:#888; font-family:'Courier New',monospace; }
 .skel { display:inline-block; background:#ebebeb; border-radius:2px; animation:pulse 1.3s ease-in-out infinite; }
 @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+#setup {
+  position:fixed; top:0; left:0; width:100%; height:100%;
+  background:#fff; display:flex; flex-direction:column;
+  align-items:center; justify-content:center; gap:16px;
+  font-family:'Courier New',monospace; z-index:99;
+}
+#setup h2 { font-size:16px; font-weight:bold; letter-spacing:0.05em; }
+#setup p { font-size:11px; color:#555; text-align:center; max-width:420px; line-height:1.6; }
+#setup input {
+  font-family:'Courier New',monospace; font-size:13px;
+  border:1.5px solid #000; padding:8px 12px; width:320px; outline:none;
+}
+#setup button {
+  font-family:'Courier New',monospace; font-size:12px; letter-spacing:0.08em;
+  border:1.5px solid #000; background:#000; color:#fff;
+  padding:8px 24px; cursor:pointer;
+}
+#setup button:hover { background:#333; }
+#setup .hint { font-size:10px; color:#888; }
 </style>
 </head>
 <body>
+
+<!-- Setup obrazovka pokud není API klíč -->
+<div id="setup">
+  <h2>NASTAVENÍ API KLÍČE</h2>
+  <p>Zadej svůj bezplatný Finnhub API klíč.<br>
+  Získáš ho zdarma na <strong>finnhub.io</strong> → Get free API key.</p>
+  <input type="text" id="apikey-input" placeholder="např. d0abc123xyz456..." spellcheck="false" />
+  <button onclick="saveKey()">ULOŽIT A SPUSTIT</button>
+  <span class="hint">Klíč se uloží do prohlížeče, nemusíš ho zadávat znovu.</span>
+</div>
 
 <header>
   <h1>Přehled akcií</h1>
@@ -70,17 +99,34 @@ footer  { border-top:1px solid #bbb; padding-top:5px; display:flex; justify-cont
 </div>
 
 <footer>
-  <span>Zdroj: Yahoo Finance</span>
+  <span>Zdroj: Finnhub.io (free tier)</span>
   <span id="nxt">Obnova za 5:00</span>
-  <span>Živý obraz / e-ink</span>
+  <span><a href="#" onclick="resetKey()" style="color:#aaa;text-decoration:none">změnit klíč</a></span>
 </footer>
 
 <script>
 const STOCKS = [
   { id:'OKLO', sym:'OKLO',  name:'Oklo Inc.' },
-  { id:'BRKB', sym:'BRK-B', name:'Berkshire Hathaway B' },
+  { id:'BRKB', sym:'BRK.B', name:'Berkshire Hathaway B' },
   { id:'GOOGL', sym:'GOOGL', name:'Alphabet Inc.' }
 ];
+
+const STORAGE_KEY = 'finnhub_api_key';
+
+function getKey() { return localStorage.getItem(STORAGE_KEY) || ''; }
+
+function saveKey() {
+  const val = document.getElementById('apikey-input').value.trim();
+  if (!val) { alert('Zadej prosím API klíč.'); return; }
+  localStorage.setItem(STORAGE_KEY, val);
+  document.getElementById('setup').style.display = 'none';
+  loadAll();
+}
+
+function resetKey() {
+  localStorage.removeItem(STORAGE_KEY);
+  location.reload();
+}
 
 function fp(n) {
   if (n==null||isNaN(n)) return '—';
@@ -92,56 +138,39 @@ function f2(n) {
   return (v>=0?'+':'')+v.toFixed(2);
 }
 
-// Zkusí více CORS proxy za sebou
-const PROXIES = [
-  url => `https://corsproxy.io/?${encodeURIComponent(url)}`,
-  url => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
-  url => `https://thingproxy.freeboard.io/fetch/${url}`
-];
-
-async function fetchWithProxy(url) {
-  for (const makeProxy of PROXIES) {
-    try {
-      const r = await fetch(makeProxy(url), { signal: AbortSignal.timeout(8000) });
-      if (!r.ok) continue;
-      const text = await r.text();
-      if (text && text.length > 50 && !text.includes('error')) return text;
-    } catch(e) { continue; }
-  }
-  throw new Error('Všechny proxy selhaly');
+async function fetchQuote(sym, key) {
+  const r = await fetch(`https://finnhub.io/api/v1/quote?symbol=${sym}&token=${key}`);
+  if (!r.ok) throw new Error('HTTP '+r.status);
+  const d = await r.json();
+  if (d.c === 0) throw new Error('Žádná data');
+  return {
+    price: d.c,
+    change: d.d,
+    changePct: d.dp,
+    open: d.o,
+    high: d.h,
+    low: d.l,
+    prevClose: d.pc
+  };
 }
 
-async function fetchStock(s) {
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${s.sym}?interval=1d&range=1mo`;
-  const text = await fetchWithProxy(url);
-  const data = JSON.parse(text);
-  const result = data.chart.result[0];
-  const meta = result.meta;
-  const closes = (result.indicators.quote[0].close || []).filter(v=>v!=null);
-
-  const price = meta.regularMarketPrice;
-  const prevClose = meta.chartPreviousClose || meta.previousClose;
-  const change = price - prevClose;
-  const changePct = (change / prevClose) * 100;
-
-  return {
-    price,
-    change,
-    changePct,
-    open: meta.regularMarketOpen,
-    high: meta.regularMarketDayHigh,
-    low: meta.regularMarketDayLow,
-    vol: meta.regularMarketVolume,
-    history: closes
-  };
+async function fetchCandles(sym, key) {
+  const to = Math.floor(Date.now()/1000);
+  const from = to - 60*60*24*35;
+  const r = await fetch(`https://finnhub.io/api/v1/stock/candle?symbol=${sym}&resolution=D&from=${from}&to=${to}&token=${key}`);
+  if (!r.ok) return [];
+  const d = await r.json();
+  if (d.s !== 'ok') return [];
+  return d.c || [];
 }
 
 function renderCard(s, q) {
   const el = document.getElementById('card-'+s.id);
   if (!el) return;
-  const arrow = q.change>=0?'▲':'▼';
+  const arrow = (q.change||0)>=0?'▲':'▼';
+  const label = s.id==='BRKB'?'BRK.B':s.id;
   el.innerHTML = `
-    <div class="ticker">${s.id==='BRKB'?'BRK.B':s.id}</div>
+    <div class="ticker">${label}</div>
     <div class="cname">${s.name}</div>
     <div class="price">${fp(q.price)}</div>
     <div class="chg">${arrow} ${f2(q.change)} (${f2(q.changePct)}%)</div>
@@ -149,14 +178,14 @@ function renderCard(s, q) {
       <span><span class="lbl">Otevření</span>${fp(q.open)}</span>
       <span><span class="lbl">Max</span>${fp(q.high)}</span>
       <span><span class="lbl">Min</span>${fp(q.low)}</span>
-      <span><span class="lbl">Objem</span>${q.vol?(q.vol/1e6).toFixed(1)+'M':'—'}</span>
+      <span><span class="lbl">Předchozí</span>${fp(q.prevClose)}</span>
     </div>`;
 }
 
 function drawSpark(id, history) {
   const canvas = document.getElementById('sp-'+id);
   if (!canvas) return;
-  const valid = (history||[]).filter(v=>!isNaN(v));
+  const valid = (history||[]).filter(v=>!isNaN(v)&&v>0);
   const W=canvas.offsetWidth||220, H=60;
   canvas.width=W; canvas.height=H;
   const ctx=canvas.getContext('2d');
@@ -189,20 +218,25 @@ function tick() {
 }
 
 async function loadAll() {
+  const key = getKey();
+  if (!key) return;
   setTs();
   const st=document.getElementById('status');
   st.textContent='Stahuji aktuální kurzy…';
   let ok=0, errs=[];
   for(const s of STOCKS) {
     try {
-      const q=await fetchStock(s);
-      renderCard(s,q);
-      setTimeout(()=>drawSpark(s.id,q.history),60);
+      const [q, hist] = await Promise.all([
+        fetchQuote(s.sym, key),
+        fetchCandles(s.sym, key)
+      ]);
+      renderCard(s, q);
+      setTimeout(()=>drawSpark(s.id, hist), 60);
       ok++;
     } catch(e) {
       errs.push(s.id);
       const el=document.getElementById('card-'+s.id);
-      if(el) el.innerHTML=`<div class="ticker">${s.id}</div><div class="cname" style="color:#c00;margin-top:8px;font-size:10px">Chyba načítání</div>`;
+      if(el) el.innerHTML=`<div class="ticker">${s.id}</div><div class="cname" style="color:#c00;margin-top:8px;font-size:10px">${e.message}</div>`;
     }
   }
   st.textContent = ok===STOCKS.length
@@ -210,7 +244,11 @@ async function loadAll() {
     : `Načteno ${ok}/3${errs.length?' – chyba: '+errs.join(', '):''}`;
 }
 
-loadAll();
+// Start
+if (getKey()) {
+  document.getElementById('setup').style.display='none';
+  loadAll();
+}
 setInterval(tick,1000);
 </script>
 </body>
